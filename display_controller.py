@@ -110,11 +110,16 @@ class DisplayController:
     def __init__(self, midi_device, sequencer):
         self.midi_device = midi_device
         self.sequencer = sequencer
+
+        # Define LCD dimensions as class variables
+        self.lcd_width = 16
+        self.lcd_height = 2
+
         self.lcd = CharLCD(
             pin_rs=25, pin_rw=24, pin_e=23,
             pins_data=[17, 18, 27, 22],
             numbering_mode=GPIO.BCM,
-            cols=16, rows=2
+            cols=self.lcd_width, rows=self.lcd_height
         )
         self.current_page = 0
         self.pages = ['MIDI', 'NOTE', 'TIME', 'SCALE']
@@ -124,6 +129,14 @@ class DisplayController:
             'TIME': ['bpm', 'pattern_length', 'steps_per_bar'],
             'SCALE': ['root', 'type', 'start_oct', 'end_oct', 'apply']
         }
+        # Define display priorities and abbreviations
+        self.param_abbreviations = {
+            'pattern_length': 'pattern',
+            'steps_per_bar': 'steps#',
+            'start_oct': 'start',
+            'end_oct': 'end',
+        }
+
         self.current_param_index = 0
         self.note_params = {'note': None, 'duration': 0.5}
         self.editing = False
@@ -208,6 +221,61 @@ class DisplayController:
         elif self.pages[self.current_page] == 'SCALE':
             self.display_scale()
 
+    def format_parameter_text(self, param, value, selected=False, editing=False):
+        """
+        Format parameter text intelligently based on available space.
+
+        Args:
+            param: Parameter name
+            value: Parameter value
+            selected: Whether this parameter is selected
+            editing: Whether this parameter is being edited
+
+        Returns:
+            Formatted text string that fits within LCD width
+        """
+        # Selection indicator
+        prefix = '*' if selected else ' '
+
+        # Try full parameter name first
+        param_text = f"{prefix}{param}:{value}"
+
+        # If it doesn't fit and we have an abbreviation, use that
+        if len(param_text) > self.lcd_width and param in self.param_abbreviations:
+            param_text = f"{prefix}{self.param_abbreviations[param]}:{value}"
+
+        ###### This solution is a little messy, for final product each truncation should be properly accounted for.
+        # If still too long, use intelligent truncation
+        if len(param_text) > self.lcd_width:
+            # Calculate available space after prefix, colon and value
+            value_str = str(value)
+            value_len = len(value_str)
+
+            # Calculate maximum parameter name length
+            # (LCD width - prefix - colon - value)
+            max_param_len = self.lcd_width - 1 - 1 - value_len
+
+            if max_param_len >= 3:  # Ensure minimum readable length
+                # Truncate parameter name while keeping as much as possible
+                truncated_param = param[:max_param_len]
+                param_text = f"{prefix}{truncated_param}:{value}"
+            else:
+                # Last resort: truncate value if parameter is more important
+                max_value_len = self.lcd_width - 1 - 1 - 3  # Keep at least 3 chars of param
+                if max_value_len >= 2:  # Ensure value is still meaningful
+                    truncated_param = param[:3]
+                    truncated_value = value_str[:max_value_len]
+                    param_text = f"{prefix}{truncated_param}:{truncated_value}"
+                else:
+                    # Extreme case: just show shortened versions of both
+                    param_text = f"{prefix}{param[:3]}:{value_str[:2]}"
+
+        # Handle editing mode by adding cursor indicator
+        if editing and len(param_text) < self.lcd_width:
+            param_text += "_"
+
+        return param_text[:self.lcd_width]  # Ensure it fits
+
     def display_midi(self):
         self.lcd.cursor_pos = (0, 0)
         channel_str = f"CH:{self.midi_device.channel}"
@@ -252,42 +320,72 @@ class DisplayController:
             self.lcd.write_string(f"*Dur:{dur}")
 
     def display_time(self):
-        """Display timing parameters with scrolling support"""
-        visible_params = list(self.time_params.keys())[self.param_scroll_offset:self.param_scroll_offset + 2]
+        """Display timing parameters with text formatting"""
+        # Get the visible parameters based on the current scroll offset
+        time_params_keys = list(self.time_params.keys())
+        visible_params = time_params_keys[self.param_scroll_offset:self.param_scroll_offset + 2]
 
         for i, param in enumerate(visible_params):
-            self.lcd.cursor_pos = (i, 0)
+            # Get the current value of the parameter
             value = str(self.time_params[param])
 
-            if param == self.params['TIME'][self.current_param_index]:
-                if self.editing:
-                    value = self.edit_buffer + '_' if len(self.edit_buffer) < 3 else self.edit_buffer
-                prefix = '*'
-            else:
-                prefix = ' '
+            # Determine if this parameter is selected
+            selected = param == self.params['TIME'][self.current_param_index]
 
-            param_text = f"{prefix}{param[:5]}:{value}"
-            self.lcd.write_string(param_text[:16])
+            # Handle editing mode
+            if selected and self.editing:
+                display_value = self.edit_buffer
+            else:
+                display_value = value
+
+            # Format text
+            param_text = self.format_parameter_text(
+                param,
+                display_value,
+                selected=selected,
+                editing=(selected and self.editing)
+            )
+
+            # Set cursor position and display the text
+            self.lcd.cursor_pos = (i, 0)
+            self.lcd.write_string(param_text)
 
     def display_scale(self):
-        visible_params = list(self.scale_params.keys())[self.param_scroll_offset:self.param_scroll_offset + 2]
+        """Display scale parameters with smart text formatting"""
+        # Get the visible parameters based on the current scroll offset
+        scale_params_keys = list(self.scale_params.keys())
+        visible_params = scale_params_keys[self.param_scroll_offset:self.param_scroll_offset + 2]
 
         for i, param in enumerate(visible_params):
-            self.lcd.cursor_pos = (i, 0)
+            # Get the current value of the parameter
             value = str(self.scale_params[param])
 
-            if param == self.params['SCALE'][self.current_param_index]:
-                if self.editing:
-                    if param in ['root', 'type']:
-                        value = f"{value} [<>]"
-                    else:
-                        value = self.edit_buffer + '_' if len(self.edit_buffer) < 3 else self.edit_buffer
-                prefix = '*'
-            else:
-                prefix = ' '
+            # Determine if this parameter is selected
+            selected = param == self.params['SCALE'][self.current_param_index]
 
-            param_text = f"{prefix}{param[:5]}:{value}"
-            self.lcd.write_string(param_text[:16])
+            # Handle editing mode
+            if selected and self.editing:
+                if param in ['root', 'type']:
+                    display_value = f"{value} [<>]"
+                elif param == 'apply':
+                    # For 'apply' parameter, indicate it can be toggled using scrolling
+                    display_value = f"{value} [<>]"
+                else:
+                    display_value = self.edit_buffer
+            else:
+                display_value = value
+
+            # Format text intelligently using our new function
+            param_text = self.format_parameter_text(
+                param,
+                display_value,
+                selected=selected,
+                editing=(selected and self.editing)
+            )
+
+            # Set cursor position and display the text
+            self.lcd.cursor_pos = (i, 0)
+            self.lcd.write_string(param_text)
 
     def start_scale_playback(self):
         """Start the sequencer playback"""
@@ -304,8 +402,6 @@ class DisplayController:
             self.error_handler.show_error("Started")
         except Exception as e:
             self.error_handler.show_error("Scale error")
-        
-
 
     def stop_scale_playback(self):
         """Stop the sequencer playback"""
@@ -331,7 +427,7 @@ class DisplayController:
         page = self.pages[self.current_page]
         max_params = len(self.params[page])
 
-        # Update selected parameter
+        # Update selected parameter with wrap-around
         old_index = self.current_param_index
         self.current_param_index = (self.current_param_index - 1) % max_params
 
@@ -339,10 +435,10 @@ class DisplayController:
         if page in ['TIME', 'SCALE']:
             # If we're moving up and already at top of visible window, scroll up
             if old_index == self.param_scroll_offset:
-                self.param_scroll_offset = max(0, self.param_scroll_offset - 1)
-            # If we wrapped around to bottom, show last two parameters
-            elif old_index == 0:
-                self.param_scroll_offset = max(0, max_params - 2)
+                self.param_scroll_offset = (self.param_scroll_offset - 1) % max_params
+                # If we're at the last parameter, set scroll offset to show last parameters
+                if self.current_param_index == max_params - 1:
+                    self.param_scroll_offset = max(0, max_params - 2)
 
         self.update_display()
 
@@ -350,7 +446,7 @@ class DisplayController:
         page = self.pages[self.current_page]
         max_params = len(self.params[page])
 
-        # Update selected parameter
+        # Update selected parameter with wrap-around
         old_index = self.current_param_index
         self.current_param_index = (self.current_param_index + 1) % max_params
 
@@ -358,10 +454,10 @@ class DisplayController:
         if page in ['TIME', 'SCALE']:
             # If we're moving down and at bottom of visible window, scroll down
             if old_index == self.param_scroll_offset + 1:
-                self.param_scroll_offset = min(max_params - 2, self.param_scroll_offset + 1)
-            # If we wrapped around to top, show first two parameters
-            elif old_index == max_params - 1:
-                self.param_scroll_offset = 0
+                self.param_scroll_offset = (self.param_scroll_offset + 1) % max_params
+                # If we've wrapped to first parameter, reset scroll offset to 0
+                if self.current_param_index == 0:
+                    self.param_scroll_offset = 0
 
         self.update_display()
 
